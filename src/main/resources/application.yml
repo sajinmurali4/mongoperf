@@ -1,0 +1,32 @@
+spring:
+  application:
+    name: mongodbtest-service
+  data:
+    mongodb:
+      authentication-database: admin
+      database: dbtest
+      uri: mongodb://admin:Ecssupport09@192.168.45.19:32102
+  jmx:
+    enabled: 'true'
+server:
+  port: 8070
+project:
+  info:
+    version: "0.0.1-SNAPSHOT"
+    name: "mongodbtest Service"
+    description: "Microservice for payment processing" 
+documentation:
+  swagger:
+    basePackage: "com.ecsfin.mongoperf"
+logging:
+  level:
+    root: INFO
+management:
+  endpoints:
+    web:
+      exposure:
+        include: hawtio,jolokia, prometheus
+hawtio:
+  authenticationEnabled: false
+javers:
+  newObjectSnapshot: 'true'

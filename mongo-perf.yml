@@ -1,0 +1,72 @@
+kind: Service
+apiVersion: v1
+metadata:
+  name: mongo-perf
+  labels:
+    app: mongo-perf
+    spring-boot: "true"
+spec:
+  selector:
+    app: mongo-perf
+  ports:
+    - protocol: "TCP"
+      port: 8070
+      targetPort: 8070
+      nodePort: 30870
+  type: LoadBalancer
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongo-perf
+  labels:
+    app: mongo-perf
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mongo-perf
+  #  strategy:
+  #    rollingUpdate:
+  #      maxSurge: 1
+  #      maxUnavailable: 0
+  #    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: mongo-perf
+    spec:
+      containers:
+        - name: mongo-perf
+          image: docker.io/ecsfin/mongo-perf-app
+          ports:
+            - containerPort: 8070
+          resources:
+            limits:
+              memory: 1280Mi
+            requests:
+              cpu: 600m
+              memory: 756Mi
+          livenessProbe:
+            httpGet:
+              port: 8070
+              path: /actuator/health/liveness
+            initialDelaySeconds: 300
+            timeoutSeconds: 2
+            periodSeconds: 6
+            failureThreshold: 1
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8070
+            periodSeconds: 4
+          volumeMounts:
+            - name: varlog
+              mountPath: /var/log
+      imagePullSecrets:
+        - name: dockerhubreg
+        - name: nexusregcred
+      volumes:
+        - name: varlog
+          persistentVolumeClaim:
+            claimName: gce-claim          
