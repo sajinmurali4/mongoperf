@@ -1,0 +1,124 @@
+podTemplate(yaml: '''
+    apiVersion: v1
+    kind: Pod
+    spec:
+      containers:
+      - name: maven
+        image: maven:3.8.1-jdk-8
+        command:
+        - sleep
+        args:
+        - 99d
+      - name: kaniko
+        image: gcr.io/kaniko-project/executor:debug
+        command:
+        - sleep
+        args:
+        - 9999999
+        volumeMounts:
+        - name: kaniko-secret
+          mountPath: /kaniko/.docker
+      restartPolicy: Never
+      volumes:
+      - name: kaniko-secret
+        secret:
+            secretName: dockercred
+            items:
+            - key: .dockerconfigjson
+              path: config.json
+''')
+node {
+    try {
+        def remote = [:]
+        remote.name = 'master-node'
+        remote.host = "${devKubeIP}"
+        remote.user = 'root'
+        withCredentials([string(credentialsId: 'kubernetes-master-password', variable: 'KubePassword')]) {
+            remote.password = "${KubePassword}"
+        }
+        remote.allowAnyHosts = true
+        def gitRepoURL = 'http://192.168.75.53/labs/db_test_services/mongo_perf_test.git'
+        def serviceName = 'com.ecsfin.service/mongo_perf_service'
+        def deploymentYamlFile = 'mongo_perf_service'
+        boolean rePush = true
+
+        stage("Git Clone") {
+            git credentialsId: '7cf7dbf3-4fa5-4983-8ce6-f9f7369f3094', url: "${gitRepoURL}"
+            commitId = sh(returnStdout: true, script: 'git rev-parse HEAD')
+            echo "${commitId}"
+        }
+        stage("Versioning") {
+            projectVersion = sh(returnStdout: true, script: 'mvn help:evaluate -Dexpression=project.version -q -DforceStdout')
+            sh "chmod 777 version.sh"
+            sh "./version.sh paymentservice:${projectVersion}"
+            if (pushCloudRepo.toBoolean()) {
+                       WEB_IMAGE_NAME="${cloudIP}/${serviceName}:${projectVersion}"
+                   } else {
+                        WEB_IMAGE_NAME="${nexusIP}/${serviceName}:${projectVersion}"
+                   }
+
+        }
+        stage("Maven Build") {
+            withSonarQubeEnv('sonar-qube') {
+                sh "mvn clean install sonar:sonar -DskipTests"
+            }
+        }
+        stage("Docker Image Build") {
+            withSonarQubeEnv('sonar-qube') {
+                sh "docker build -t $WEB_IMAGE_NAME  ."
+            }
+        }
+        if (!skipTest.toBoolean()) {
+            stage("Code Quality Check") {
+                sleep(60)
+                timeout(time: 1, unit: 'HOURS') {
+                    def qg = waitForQualityGate()
+                    if (qg.status != 'OK') {
+                        error "Pipeline aborted due to quality gate failure: ${qg.status}"
+                    }
+                }
+            }
+            stage("Dependency Vulnerability Scan") {
+                dependencyCheck additionalArguments: '--format HTML --format XML', odcInstallation: 'default'
+                dependencyCheckPublisher failedTotalCritical: 3, pattern: ''
+                if (currentBuild.result == 'FAILURE')
+                    error('FAILED as Maximum number of Vulenerablilites crossed the input threshold ')
+            }
+        }
+        stage("Docker Push") {
+            container('kaniko') {
+              sh '''
+                /kaniko/executor --context `pwd` --destination $WEB_IMAGE_NAME
+                 '''
+             }
+            } catch (all) {
+                throw new Exception("Push to Remote Repository Failed")
+            }
+        }
+
+            stage("Kuberentes Deploy") {
+              if (!pushCloudRepo.toBoolean()) {
+                sshagent(['kube-53']) {
+                    sh "scp -o StrictHostKeyChecking=no ${deploymentYamlFile}.yml root@${devKubeIP}:/root/"
+                }
+                try {
+                    sshCommand remote: remote, command: "kubectl create -f ${deploymentYamlFile}.yml"
+                } catch (all) {
+                    sshCommand remote: remote, command: "kubectl apply -f ${deploymentYamlFile}.yml"
+                    sshCommand remote: remote, command: "kubectl rollout restart deployment  ${deploymentYamlFile}"
+                }
+             } else {
+                 sh  "sed -i 's|192.168.75.4:8082/com.ecsfin.service/tagVersion|${WEB_IMAGE_NAME}|g' ${deploymentYamlFile}.yml"
+                 sh  "sed -i 's|gce-claim|azurefile|g' ${deploymentYamlFile}.yml"
+                 sh "kubectl apply -f ${deploymentYamlFile}.yml --kubeconfig /root/.kube/config"
+                 sh "kubectl rollout restart  deployment  ${deploymentYamlFile} --kubeconfig /root/.kube/config"
+                }
+            }
+    } catch(err){
+            echo err.getMessage()
+            mail bcc: '', body: '''Hi All
+            Please check Jenkins as the following error has occured in Project config-Server
+            ERROR :- '''+err.getMessage(), cc: '', from: '', replyTo: '', subject: 'Jenkins ERROR in Initial-Setup', to: 'skmidhun09@gmail.com'
+            error('Pipline Stage Failed')
+    }
+}
